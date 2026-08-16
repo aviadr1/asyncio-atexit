@@ -83,7 +83,7 @@ from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 __all__ = ["register", "unregister", "enable_exit_watchdog", "arm_exit_watchdog"]
-__version__ = "2.0.0"
+__version__ = "1.1.0"
 
 log = logging.getLogger(__name__)
 
