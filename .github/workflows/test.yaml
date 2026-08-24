@@ -11,7 +11,7 @@ on:
 jobs:
   # Run tests
   test:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
 
     strategy:
@@ -27,16 +27,16 @@ jobs:
           - "3.14"
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
       - name: Install Python ${{ matrix.python }}
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
 
       # preserve pip cache to speed up installation
       - name: Cache pip
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           # Look to see if there is a cache hit for the corresponding requirements file
