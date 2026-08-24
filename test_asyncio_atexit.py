@@ -222,6 +222,9 @@ def test_i2_a_hung_callback_does_not_prevent_later_callbacks(loop_factory):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.version_info < (3, 8), reason="threading.excepthook was added in Python 3.8"
+)
 def test_i3_off_thread_exception_is_reported_not_left_to_excepthook(
     loop_factory, caplog
 ):
