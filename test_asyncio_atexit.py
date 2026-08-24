@@ -2,7 +2,6 @@ import asyncio
 import os
 import subprocess
 import sys
-import textwrap
 import threading
 import time
 import warnings
@@ -370,8 +369,9 @@ def test_watchdog_actually_terminates_a_wedged_process():
     started = time.monotonic()
     result = subprocess.run(
         [sys.executable, "-c", _WEDGED_PROCESS.format(repo=repo)],
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
         timeout=90,
     )
     elapsed = time.monotonic() - started

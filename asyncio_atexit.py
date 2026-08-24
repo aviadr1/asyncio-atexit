@@ -69,8 +69,6 @@ has nothing left worth waiting for, so cutting cleanup short there is the correc
 than a misconfiguration.
 """
 
-from __future__ import annotations
-
 import asyncio
 import inspect
 import logging
@@ -225,10 +223,24 @@ def set_watchdog_exit_code(code: int) -> None:
     _WATCHDOG_EXIT_CODE = code
 
 
+def _get_running_loop() -> asyncio.AbstractEventLoop:
+    """Return the running loop on every supported Python version."""
+    if sys.version_info >= (3, 7):
+        return asyncio.get_running_loop()
+
+    # Python 3.6 has no public get_running_loop(). get_event_loop() returns the
+    # active loop from inside a callback/coroutine, but can also create an idle
+    # loop, so preserve get_running_loop()'s failure contract explicitly.
+    loop = asyncio.get_event_loop()
+    if not loop.is_running():
+        raise RuntimeError("no running event loop")
+    return loop
+
+
 def _get_entry(loop: Optional[asyncio.AbstractEventLoop] = None) -> _RegistryEntry:
     """Get the registry entry for an event loop."""
     if loop is None:
-        loop = asyncio.get_running_loop()
+        loop = _get_running_loop()
     _register_loop(loop)
     return _registry[loop]
 
@@ -257,7 +269,7 @@ async def _run_in_daemon_thread(fn: Callable[[], Any], *, timeout: float) -> Any
     workers at interpreter exit, so a stuck job there would hang the process anyway - the exact
     failure this module exists to prevent.
     """
-    loop = asyncio.get_running_loop()
+    loop = _get_running_loop()
     done = asyncio.Event()
     box: Dict[str, Any] = {}
 
@@ -291,7 +303,7 @@ async def _call_bounded(callback: Callable[[], Any], timeout: float) -> None:
     """
     Invoke one callback under a single deadline covering both of its phases.
     """
-    loop = asyncio.get_running_loop()
+    loop = _get_running_loop()
     deadline = loop.time() + timeout
 
     if inspect.iscoroutinefunction(callback):
