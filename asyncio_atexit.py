@@ -294,7 +294,7 @@ async def _call_bounded(callback: Callable[[], Any], timeout: float) -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
 
-    if asyncio.iscoroutinefunction(callback):
+    if inspect.iscoroutinefunction(callback):
         # Calling a coroutine function only builds the coroutine; nothing runs yet, so this
         # cannot block.
         result: Any = callback()
