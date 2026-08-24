@@ -2,9 +2,9 @@ import asyncio
 import os
 import subprocess
 import sys
-import textwrap
 import threading
 import time
+import warnings
 
 try:
     import uvloop
@@ -15,21 +15,9 @@ import pytest
 
 import asyncio_atexit
 
-if sys.version_info >= (3, 7):
-    asyncio_run = asyncio.run
-else:
-
-    def asyncio_run(coro):
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(coro)
-        finally:
-            loop.close()
-
-
-policies = ["default"]
+loop_factories = [pytest.param(asyncio.new_event_loop, id="default")]
 if uvloop is not None:
-    policies.append("uvloop")
+    loop_factories.append(pytest.param(uvloop.new_event_loop, id="uvloop"))
 
 
 @pytest.fixture(autouse=True)
@@ -46,19 +34,20 @@ def reset_watchdog_state():
     asyncio_atexit._watchdog_armed = False
 
 
-@pytest.fixture(params=policies)
-def policy(request):
-    before_policy = asyncio.get_event_loop_policy()
-    if request.param == "default":
-        policy = asyncio.DefaultEventLoopPolicy()
-    elif request.param == "uvloop":
-        policy = uvloop.EventLoopPolicy()
-    asyncio.set_event_loop_policy(policy)
-    yield
-    asyncio.set_event_loop_policy(before_policy)
+@pytest.fixture(params=loop_factories)
+def loop_factory(request):
+    return request.param
 
 
-def test_asyncio_atexit(policy):
+def _run(coro, loop_factory):
+    loop = loop_factory()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def test_asyncio_atexit(loop_factory):
     sync_called = False
     async_called = False
 
@@ -75,12 +64,12 @@ def test_asyncio_atexit(policy):
         asyncio_atexit.register(sync_cb)
         asyncio_atexit.register(async_cb)
 
-    asyncio_run(test())
+    _run(test(), loop_factory)
     assert sync_called
     assert async_called
 
 
-def test_unregister(policy):
+def test_unregister(loop_factory):
     sync_called = False
 
     def sync_cb():
@@ -92,11 +81,11 @@ def test_unregister(policy):
         asyncio_atexit.register(sync_cb)
         asyncio_atexit.unregister(sync_cb)
 
-    asyncio_run(test())
+    _run(test(), loop_factory)
     assert not sync_called
 
 
-def test_run_raises(policy):
+def test_run_raises(loop_factory):
     sync_called = False
 
     def sync_cb():
@@ -108,14 +97,14 @@ def test_run_raises(policy):
         1 / 0
 
     with pytest.raises(ZeroDivisionError):
-        asyncio_run(test())
+        _run(test(), loop_factory)
 
     assert sync_called
 
 
-def _time_close(register_callbacks):
+def _time_close(register_callbacks, loop_factory=asyncio.new_event_loop):
     """Drive a real loop through the patched close, returning how long closing took."""
-    loop = asyncio.new_event_loop()
+    loop = loop_factory()
 
     async def _setup():
         register_callbacks()
@@ -132,7 +121,7 @@ def _time_close(register_callbacks):
 
 
 @pytest.mark.timeout(60)
-def test_i1_blocking_sync_callback_is_bounded(policy):
+def test_i1_blocking_sync_callback_is_bounded(loop_factory):
     """
     The incident shape, and the reason this is a fork rather than a patch.
 
@@ -152,7 +141,9 @@ def test_i1_blocking_sync_callback_is_bounded(policy):
         release.wait(timeout=120)
 
     try:
-        elapsed = _time_close(lambda: asyncio_atexit.register(hangs_forever, timeout=1))
+        elapsed = _time_close(
+            lambda: asyncio_atexit.register(hangs_forever, timeout=1), loop_factory
+        )
         assert entered.is_set(), "the blocking callback never ran"
         assert elapsed < 20, f"close took {elapsed:.1f}s; the hung callback was not abandoned"
     finally:
@@ -160,17 +151,19 @@ def test_i1_blocking_sync_callback_is_bounded(policy):
 
 
 @pytest.mark.timeout(60)
-def test_i1_hanging_coroutine_callback_is_bounded(policy):
+def test_i1_hanging_coroutine_callback_is_bounded(loop_factory):
     async def never_resolves():
         await asyncio.Event().wait()
 
-    elapsed = _time_close(lambda: asyncio_atexit.register(never_resolves, timeout=1))
+    elapsed = _time_close(
+        lambda: asyncio_atexit.register(never_resolves, timeout=1), loop_factory
+    )
 
     assert elapsed < 20, f"close took {elapsed:.1f}s; the hung coroutine was not abandoned"
 
 
 @pytest.mark.timeout(90)
-def test_i1_total_close_time_is_bounded_by_the_sum_of_timeouts(policy):
+def test_i1_total_close_time_is_bounded_by_the_sum_of_timeouts(loop_factory):
     """
     The bound is per callback, so several wedged callbacks add up rather than sharing a budget.
     Pinning the sum keeps that explicit: it is what sets the watchdog grace, and it is why the
@@ -187,7 +180,7 @@ def test_i1_total_close_time_is_bounded_by_the_sum_of_timeouts(policy):
             asyncio_atexit.register(hangs_forever, timeout=t)
 
     try:
-        elapsed = _time_close(_register)
+        elapsed = _time_close(_register, loop_factory)
         assert elapsed >= sum(timeouts) - 0.5, (
             f"close took only {elapsed:.1f}s for {len(timeouts)} hung callbacks; they did not "
             "each get their own bound"
@@ -205,7 +198,7 @@ def test_i1_total_close_time_is_bounded_by_the_sum_of_timeouts(policy):
 
 
 @pytest.mark.timeout(60)
-def test_i2_a_hung_callback_does_not_prevent_later_callbacks(policy):
+def test_i2_a_hung_callback_does_not_prevent_later_callbacks(loop_factory):
     release = threading.Event()
     after = []
 
@@ -217,7 +210,7 @@ def test_i2_a_hung_callback_does_not_prevent_later_callbacks(policy):
         asyncio_atexit.register(lambda: after.append("still ran"), timeout=5)
 
     try:
-        _time_close(_register)
+        _time_close(_register, loop_factory)
         assert after == ["still ran"], "callbacks after the hung one were skipped"
     finally:
         release.set()
@@ -228,7 +221,12 @@ def test_i2_a_hung_callback_does_not_prevent_later_callbacks(policy):
 # ---------------------------------------------------------------------------
 
 
-def test_i3_off_thread_exception_is_reported_not_left_to_excepthook(policy, caplog):
+@pytest.mark.skipif(
+    sys.version_info < (3, 8), reason="threading.excepthook was added in Python 3.8"
+)
+def test_i3_off_thread_exception_is_reported_not_left_to_excepthook(
+    loop_factory, caplog
+):
     """
     Sync callbacks now run on a worker thread, where an exception cannot reach the awaiting
     coroutine by itself. It has to be carried back and logged; letting it escape would print a
@@ -243,7 +241,7 @@ def test_i3_off_thread_exception_is_reported_not_left_to_excepthook(policy, capl
 
     try:
         with caplog.at_level("WARNING"):
-            _time_close(lambda: asyncio_atexit.register(boom, timeout=5))
+            _time_close(lambda: asyncio_atexit.register(boom, timeout=5), loop_factory)
     finally:
         threading.excepthook = original_hook
 
@@ -253,7 +251,7 @@ def test_i3_off_thread_exception_is_reported_not_left_to_excepthook(policy, capl
     )
 
 
-def test_sync_callable_returning_an_awaitable_is_awaited(policy):
+def test_sync_callable_returning_an_awaitable_is_awaited(loop_factory):
     """Upstream supports this shape (a partial over a coroutine function), so the fork must."""
     seen = []
 
@@ -261,12 +259,27 @@ def test_sync_callable_returning_an_awaitable_is_awaited(policy):
         seen.append("awaited")
 
     # A plain lambda -- not a coroutine function -- that hands back a coroutine.
-    _time_close(lambda: asyncio_atexit.register(lambda: cleanup(), timeout=5))
+    _time_close(
+        lambda: asyncio_atexit.register(lambda: cleanup(), timeout=5), loop_factory
+    )
 
     assert seen == ["awaited"]
 
 
-def test_register_outside_a_running_loop_raises(policy):
+def test_coroutine_callback_dispatch_is_deprecation_clean():
+    seen = []
+
+    async def cleanup():
+        seen.append("called")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        _time_close(lambda: asyncio_atexit.register(cleanup, timeout=5))
+
+    assert seen == ["called"]
+
+
+def test_register_outside_a_running_loop_raises():
     """
     Callers that may run outside a loop rely on catching this, so it is part of the contract.
     """
@@ -279,17 +292,19 @@ def test_register_outside_a_running_loop_raises(policy):
 # ---------------------------------------------------------------------------
 
 
-def test_i5_watchdog_stays_disarmed_unless_enabled(policy):
+def test_i5_watchdog_stays_disarmed_unless_enabled(loop_factory):
     """
     Default-off matters: this ends in os._exit, and a process that closes a loop but keeps
     running must not be killed by it.
     """
-    _time_close(lambda: asyncio_atexit.register(lambda: None, timeout=5))
+    _time_close(
+        lambda: asyncio_atexit.register(lambda: None, timeout=5), loop_factory
+    )
 
     assert asyncio_atexit._watchdog_armed is False
 
 
-def test_i4_watchdog_is_armed_before_callbacks_run(policy):
+def test_i4_watchdog_is_armed_before_callbacks_run(loop_factory):
     """
     The ordering property that made the watchdog worth building into the dispatcher rather than
     registering it as another callback: as a callback it would sit behind whatever registered
@@ -303,13 +318,14 @@ def test_i4_watchdog_is_armed_before_callbacks_run(policy):
     _time_close(
         lambda: asyncio_atexit.register(
             lambda: armed_when_callback_ran.append(asyncio_atexit._watchdog_armed), timeout=5
-        )
+        ),
+        loop_factory,
     )
 
     assert armed_when_callback_ran == [True]
 
 
-def test_arming_the_watchdog_is_idempotent(policy):
+def test_arming_the_watchdog_is_idempotent():
     asyncio_atexit.enable_exit_watchdog(grace_seconds=3600)
 
     assert asyncio_atexit.arm_exit_watchdog() is True
@@ -353,8 +369,9 @@ def test_watchdog_actually_terminates_a_wedged_process():
     started = time.monotonic()
     result = subprocess.run(
         [sys.executable, "-c", _WEDGED_PROCESS.format(repo=repo)],
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
         timeout=90,
     )
     elapsed = time.monotonic() - started
